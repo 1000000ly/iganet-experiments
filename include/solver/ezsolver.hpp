@@ -130,7 +130,7 @@ public:
                                                 (deriv::dy^2)>(Base::collPts_.first,
                                                                Base::var_knot_indices_);
     
-    auto M = this->u().template eval_basfunc(Base::collPts_.first,Base::var_knot_indices_);
+    auto M = this->u().eval_basfunc(Base::collPts_.first,Base::var_knot_indices_);
 
     //M = torch::zeros({16, 100});
         
@@ -182,7 +182,7 @@ public:
     Base::lhs_ = iganet::utils::to_sparseCsrTensor(Base::var_knot_indices_,
                                                    this->u().template space<0>().degrees(),
                                                    this->u().template space<0>().ncoeffs(),
-                                                   this->u().template eval_basfunc(Base::collPts_.first, Base::var_knot_indices_).t(),
+                                                   this->u().eval_basfunc(Base::collPts_.first, Base::var_knot_indices_).t(),
                                                    { this->u().template space<0>().ncumcoeffs(),
                                                       this->u().template space<0>().ncumcoeffs() });
   }
