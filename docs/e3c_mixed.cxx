@@ -1,11 +1,14 @@
 /**
- * E3c — Mixed Loss  (α = 0.5)
+ * E3c — Mixed Loss with Normalized Residual  (α = 0.5)
  *
- * Loss:  L_mix = 0.5 * || A(G) û - b(G) ||²   (residual)
- *              + 0.5 * || û - u_ref ||²          (supervised)
+ * Loss:  L_mix = 0.5 * || A(G) û - b(G) ||² / ||b(G)||²   (relative residual)
+ *              + 0.5 * || û - u_ref ||²                     (supervised)
  *
- * Combines physical consistency with supervised signal.
- * Expected to outperform both E3a (α=1) and E3b/E1 (α=0) on both metrics.
+ * Normalization rationale:
+ *   Raw residual is O(1) while supervised MSE is O(1e-4) — a 4-order gap.
+ *   Without normalization α=0.5 is numerically identical to α≈1 (pure residual).
+ *   Dividing by ||b||² makes the residual term dimensionless (relative residual),
+ *   so both terms are O(1) at initialization and the α weight is meaningful.
  */
 
 #include <iganet.h>
@@ -54,11 +57,15 @@ struct MixedNet
     return true;
   }
 
-  // L_mix = α * ||A û - b||² + (1-α) * ||û - u_ref||²
+  // L_mix = α * ||Aû-b||²/||b||²  +  (1-α) * ||û-u_ref||²/||u_ref||²
+  // Both terms are relative errors in [0,1] range for reasonable û,
+  // so α=0.5 gives genuinely equal weight to physics and supervision.
   torch::Tensor loss(const torch::Tensor &outputs, int64_t) override {
-    auto residual = torch::mv(current_A, outputs) - current_b;
-    auto L_res    = residual.pow(2).mean();
-    auto L_sup    = torch::mse_loss(outputs, current_u_ref);
+    auto residual      = torch::mv(current_A, outputs) - current_b;
+    auto b_norm_sq     = current_b.pow(2).mean().detach()         + 1e-8;
+    auto u_ref_norm_sq = current_u_ref.pow(2).mean().detach()     + 1e-8;
+    auto L_res = residual.pow(2).mean()                   / b_norm_sq;
+    auto L_sup = torch::mse_loss(outputs, current_u_ref)  / u_ref_norm_sq;
     return alpha * L_res + (1.0 - alpha) * L_sup;
   }
 };

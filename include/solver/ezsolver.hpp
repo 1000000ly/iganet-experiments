@@ -118,30 +118,72 @@ public:
                                                                      )
            >& rhs)
     : EZSolverBase<GeometryMap, Variable>(geometryMap.template space<0>().ncoeffs(), variable.template space<0>().ncoeffs()),
-      rhs_(rhs) {}
+      rhs_(rhs) {
+    // Copy actual control points from the input geometry map.
+    // The base class constructs G() with greville init (identity map);
+    // we overwrite it here so the physical-domain Laplacian sees the
+    // correct (potentially perturbed) geometry.
+    this->G().from_tensor(geometryMap.as_tensor());
+  }
   
-  /// @brief Assembles the left-hand side as the mass matrix
+  /// @brief Assembles the left-hand side as the physical-domain Laplacian
+  ///
+  /// Uses the geometry map G to pull the physical Laplacian back to the
+  /// parametric domain:
+  ///   Δ_x B ≈ g^{11} ∂²B/∂ξ₁²  +  2 g^{12} ∂²B/∂ξ₁∂ξ₂  +  g^{22} ∂²B/∂ξ₂²
+  /// where g^{kl} = (J⁻¹ J⁻ᵀ)_{kl} and J = ∂G/∂ξ.
+  /// (Leading-order term; Christoffel corrections omitted.)
   void assembleLhs() override {
 
+    // ── Parametric second derivatives of basis functions ─────────────────────
     auto S_xx = this->u().template eval_basfunc<functionspace::interior,
                                                 (deriv::dx^2)>(Base::collPts_.first,
+                                                               Base::var_knot_indices_);
+    auto S_xy = this->u().template eval_basfunc<functionspace::interior,
+                                                deriv::dx + deriv::dy>(Base::collPts_.first,
                                                                Base::var_knot_indices_);
     auto S_yy = this->u().template eval_basfunc<functionspace::interior,
                                                 (deriv::dy^2)>(Base::collPts_.first,
                                                                Base::var_knot_indices_);
-    
-    auto M = this->u().eval_basfunc(Base::collPts_.first,Base::var_knot_indices_);
 
-    //M = torch::zeros({16, 100});
-        
-    auto mask = (Base::collPts_.first[0] == 0.0) | (Base::collPts_.first[0] == 1.0) | (Base::collPts_.first[1] == 0.0) | (Base::collPts_.first[1] == 1.0);
-    
+    // ── Mass matrix (boundary conditions: u = f on ∂Ω) ───────────────────────
+    auto M    = this->u().eval_basfunc(Base::collPts_.first, Base::var_knot_indices_);
+    auto mask = (Base::collPts_.first[0] == 0.0) | (Base::collPts_.first[0] == 1.0)
+              | (Base::collPts_.first[1] == 0.0) | (Base::collPts_.first[1] == 1.0);
+
+    // ── Jacobian of G at the collocation points ───────────────────────────────
+    // G().space<0>() : UniformBSpline<double, 2, 2, 2>  (geoDim = 2)
+    // eval<deriv::dx> → BlockTensor<Tensor,1,2>  = {∂Gx/∂ξ₁, ∂Gy/∂ξ₁}
+    auto dG1 = this->G().template space<0>().template eval<deriv::dx>(Base::collPts_.first);
+    auto dG2 = this->G().template space<0>().template eval<deriv::dy>(Base::collPts_.first);
+
+    // J = [[a, b],   a = ∂Gx/∂ξ₁   b = ∂Gx/∂ξ₂
+    //      [c, d]]   c = ∂Gy/∂ξ₁   d = ∂Gy/∂ξ₂
+    const auto& a = *dG1[0];  // [ncolpts]
+    const auto& c = *dG1[1];
+    const auto& b = *dG2[0];
+    const auto& d = *dG2[1];
+
+    auto det_sq = (a*d - b*c).pow(2) + 1e-14;  // regularise to avoid ÷0
+
+    // Contravariant metric:  g^{kl} = (J⁻¹ J⁻ᵀ)_{kl}
+    auto g11 = (b*b + d*d) / det_sq;   // [ncolpts]
+    auto g12 = -(a*b + c*d) / det_sq;
+    auto g22 = (a*a + c*c) / det_sq;
+
+    // Physical Laplacian applied to basis functions
+    // S_xx shape: [local_support, ncolpts];  g11 shape: [ncolpts]
+    // → broadcast g11.unsqueeze(0) to [1, ncolpts] then [local_support, ncolpts]
+    auto phys_lhs = g11.unsqueeze(0) * S_xx
+                  + 2.0 * g12.unsqueeze(0) * S_xy
+                  + g22.unsqueeze(0) * S_yy;
+
     Base::lhs_ = iganet::utils::to_sparseCsrTensor(Base::var_knot_indices_,
                                                    this->u().template space<0>().degrees(),
                                                    this->u().template space<0>().ncoeffs(),
-                                                   torch::where(mask, M, S_xx+S_yy).t(),
+                                                   torch::where(mask, M, phys_lhs).t(),
                                                    { this->u().template space<0>().ncumcoeffs(),
-                                                      this->u().template space<0>().ncumcoeffs() });          
+                                                      this->u().template space<0>().ncumcoeffs() });
   }
   
   /// @brief Assembles the right-hand side from the given function
