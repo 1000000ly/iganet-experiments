@@ -1,65 +1,67 @@
 /**
- * E2 — Field Value Prediction Baseline
+ * E2 — Field Value Prediction (Greville Points)
  *
- * Network:  G (50) -> [256, 256] -> u_vals (100)
- * Output is pointwise field values at Greville collocation points,
- * NOT B-spline coefficients. No structural constraint is enforced.
+ * Architecture identical to E1: 50 -> 512 -> 512 -> 512 -> 100
+ * Training label: u_val (tensors[2]) — field values at 100 Greville points,
+ *                 NOT B-spline coefficients.
  *
- * This is the direct comparison to E1. Same architecture, same data,
- * different output semantics: E1 predicts coefficients (lives in spline
- * space by construction), E2 predicts unconstrained pointwise values.
+ * Evaluation:
+ *   field_l2   — direct comparison: ||u_pred_val - u_val_ref|| / ||u_val_ref||
+ *   coeff_l2   — back-project via M^{-1}: u_coeff = M^{-1} u_pred_val,
+ *                then compare with u_ref (true coefficients)
+ *   bc_viol    — max |u_pred_val| at boundary Greville indices
  */
 
 #include <iganet.h>
 #include <solver/ezsolver.hpp>
 
 using namespace iganet;
-
 using Geo = S<UniformBSpline<double, 2, 2, 2>>;
 using Var = S<UniformBSpline<double, 1, 3, 3>>;
 
-struct FieldPredNet
+struct FieldNet
     : public IgANet<torch::optim::Adam, std::tuple<Geo>, std::tuple<Var>> {
 
   using Base = IgANet<torch::optim::Adam, std::tuple<Geo>, std::tuple<Var>>;
 
-  torch::Tensor G_data;             // [N_train, 50]
-  torch::Tensor u_val_ref;          // [N_train, 100]  pointwise field values
-  torch::Tensor current_u_val_ref;  // reference values for current sample
+  torch::Tensor G_data;
+  torch::Tensor u_val_ref;      // [N, 100] field values at Greville points
+  torch::Tensor cur_u_val;
 
-  FieldPredNet(torch::Tensor G_data_, torch::Tensor u_val_ref_)
+  FieldNet(torch::Tensor G_, torch::Tensor u_val_)
       : Base(
-            /* hidden layers */ {256, 256},
-            /* activations   */ {{{activation::tanh}}, {{activation::tanh}}, {{activation::none}}},
-            /* input ncoeffs */ std::tuple{std::array<int64_t, 2>{5, 5}},
-            /* output ncoefs */ std::tuple{std::array<int64_t, 2>{10, 10}},
+            {512, 512, 512},
+            {{{activation::tanh}}, {{activation::tanh}},
+             {{activation::tanh}}, {{activation::none}}},
+            std::tuple{std::array<int64_t, 2>{5, 5}},
+            std::tuple{std::array<int64_t, 2>{10, 10}},
             init::greville),
-        G_data(std::move(G_data_)),
-        u_val_ref(std::move(u_val_ref_)) {}
+        G_data(std::move(G_)),
+        u_val_ref(std::move(u_val_)) {}
 
   bool epoch(int64_t) override {
     int64_t idx = torch::randint(G_data.size(0), {1}).item<int64_t>();
     this->input<0>().from_tensor(G_data[idx]);
-    current_u_val_ref = u_val_ref[idx]; // target is field values, not coeffs
+    cur_u_val = u_val_ref[idx];
     return true;
   }
 
-  // Loss: MSE between predicted field values and reference field values
-  // Note: no spline structure is enforced here — this is the key difference
-  // from E1
+  // MSE on field values (no spline structure in the loss)
   torch::Tensor loss(const torch::Tensor &outputs, int64_t) override {
-    return torch::mse_loss(outputs, current_u_val_ref);
+    return torch::mse_loss(outputs, cur_u_val);
   }
 };
 
 int main() {
   init();
 
-  // Load dataset (must include u_val tensor from updated generate_data.cxx)
+  // ── Load dataset ──────────────────────────────────────────────────────────
+  // tensors[0]=G [1]=u_coeff [2]=u_val [3]=A [4]=b [5]=G_grid [6]=u_grid
   std::vector<torch::Tensor> tensors;
   torch::load(tensors, "dataset.pt");
   auto G_all     = tensors[0].to(torch::kDouble); // [500, 50]
-  auto u_val_all = tensors[2].to(torch::kDouble); // [500, 100] field values
+  auto u_all     = tensors[1].to(torch::kDouble); // [500, 100]  true coefficients
+  auto u_val_all = tensors[2].to(torch::kDouble); // [500, 100]  Greville field values
 
   int64_t N       = G_all.size(0);
   int64_t N_train = static_cast<int64_t>(N * 0.8);
@@ -68,56 +70,83 @@ int main() {
   auto G_train     = G_all.slice(0, 0, N_train).contiguous();
   auto u_val_train = u_val_all.slice(0, 0, N_train).contiguous();
   auto G_test      = G_all.slice(0, N_train).contiguous();
-  auto u_val_test  = u_val_all.slice(0, N_train).contiguous();
+  auto u_test      = u_all.slice(0, N_train).contiguous();      // true coefficients
+  auto u_val_test  = u_val_all.slice(0, N_train).contiguous();  // true field values
 
-  Log() << "[E2] Dataset: " << N << " samples"
-        << "  (train=" << N_train << ", test=" << N_test << ")\n";
+  Log() << "[E2] Dataset: " << N << "  (train=" << N_train << ", test=" << N_test << ")\n";
+  Log() << "[E2] Architecture: 50 -> 512 -> 512 -> 512 -> 100 (field values)\n";
 
-  // Build and train
-  FieldPredNet net(G_train, u_val_train);
+  // ── Build interpolation matrix M (Greville collocation) ───────────────────
+  // Used for back-projection: u_coeff = M^{-1} * u_pred_val
+  // M is the B-spline basis evaluated at Greville points — geometry-independent
+  Geo G_id({5, 5}, init::linear);
+  Var u_template({10, 10});
+  auto zero_rhs = [](const std::array<torch::Tensor, 2>& xi)
+      -> std::array<torch::Tensor, 1> {
+    return {torch::zeros_like(xi[0])};
+  };
+  EZInterpolation interp(G_id, u_template, zero_rhs);
+  interp.init();
+  interp.assemble();
+  auto M     = interp.lhs().to_dense();  // [100, 100]
+  auto M_inv = M.inverse();              // precomputed once
 
-  net.options()
-      .max_epoch(10000)
-      .min_loss(1e-7)
-      .min_loss_rel_change(1e-6);
+  // ── Boundary Greville mask ────────────────────────────────────────────────
+  // greville(false) returns TensorArray<2>: [ξ₁_coords, ξ₂_coords] each [100]
+  auto g_pts = u_template.space<0>().greville(false);
+  auto bm = (g_pts[0].abs() < 1e-10)
+           | (torch::abs(g_pts[0] - 1.0) < 1e-10)
+           | (g_pts[1].abs() < 1e-10)
+           | (torch::abs(g_pts[1] - 1.0) < 1e-10);  // bool [100]
+  Log() << "[E2] Boundary Greville points: " << bm.sum().item<int64_t>() << " / 100\n";
 
-  net.optimizerReset(torch::optim::AdamOptions(1e-3));
+  // ── Train ─────────────────────────────────────────────────────────────────
+  FieldNet net(G_train, u_val_train);
+  net.options().min_loss(0.0).min_loss_rel_change(0.0).min_loss_change(0.0);
 
-  Log() << "[E2] Training (50 -> 256 -> 256 -> 100, field values)...\n";
-  net.train();
+  double lr = 1e-3;
+  for (int seg = 0; seg < 6; ++seg) {
+    net.options().max_epoch(5000);
+    net.optimizerReset(torch::optim::AdamOptions(lr));
+    Log() << "[E2] Segment " << seg + 1 << "/6  lr=" << lr << "\n";
+    net.train();
+    lr *= 0.5;
+  }
 
-  // Evaluate on test set
-  // For E2, we compare predicted field values against reference field values.
-  // We also compute the L2 error in the reconstructed coefficient space
-  // by projecting the predicted field values back via ezinterp,
-  // so that E1 and E2 errors are comparable on equal footing.
-  double sum_val_mse    = 0.0;
-  double sum_rel_l2     = 0.0;
+  // ── Evaluate ──────────────────────────────────────────────────────────────
+  double sum_field_l2 = 0.0;
+  double sum_coeff_l2 = 0.0;
+  double max_bc_viol  = 0.0;
 
   for (int64_t i = 0; i < N_test; ++i) {
     net.input<0>().from_tensor(G_test[i]);
     net.eval();
 
-    auto u_pred_vals = net.output<0>().as_tensor(); // predicted field values
-    auto u_true_vals = u_val_test[i];
+    // E2 output: 100 predicted field values at Greville points
+    auto u_pred_val = net.output<0>().as_tensor();  // [100]
 
-    // Direct field-value MSE
-    sum_val_mse += torch::mse_loss(u_pred_vals, u_true_vals).item<double>();
+    // Field-space L2 (direct)
+    double ef = (u_pred_val - u_val_test[i]).norm().item<double>();
+    double rf = u_val_test[i].norm().item<double>();
+    sum_field_l2 += (rf > 0.0 ? ef / rf : ef);
 
-    // Relative L2 error in field-value space
-    double err = (u_pred_vals - u_true_vals).norm().item<double>();
-    double ref = u_true_vals.norm().item<double>();
-    sum_rel_l2 += (ref > 0.0 ? err / ref : err);
+    // Coefficient-space L2 (back-projection via M^{-1})
+    auto u_pred_coeff = torch::mv(M_inv, u_pred_val);
+    double ec = (u_pred_coeff - u_test[i]).norm().item<double>();
+    double rc = u_test[i].norm().item<double>();
+    sum_coeff_l2 += (rc > 0.0 ? ec / rc : ec);
+
+    // Boundary violation
+    double bc = u_pred_val.masked_select(bm).abs().max().item<double>();
+    max_bc_viol = std::max(max_bc_viol, bc);
   }
 
-  Log() << "[E2] Mean field-value MSE       : " << sum_val_mse / N_test << "\n";
-  Log() << "[E2] Mean relative L2 error     : " << sum_rel_l2  / N_test << "\n";
-  Log() << "\n[E2 vs E1] Compare the relative L2 errors above.\n"
-        << "           E1 predicts in spline space (structure-preserving).\n"
-        << "           E2 predicts unconstrained pointwise values.\n";
+  Log() << "\n[E2] Mean field-space  rel-L2 : " << sum_field_l2 / N_test << "\n";
+  Log() << "[E2] Mean coeff-space  rel-L2 : " << sum_coeff_l2 / N_test << "\n";
+  Log() << "[E2] Max boundary violation   : " << max_bc_viol             << "\n";
 
-  net.save("e2_fieldprednet.pt");
-  Log() << "[E2] Model saved to e2_fieldprednet.pt\n";
+  net.save("e2_fieldnet.pt");
+  Log() << "[E2] Model saved to e2_fieldnet.pt\n";
 
   finalize();
   return 0;

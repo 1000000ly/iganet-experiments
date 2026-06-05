@@ -99,24 +99,57 @@ int main() {
   }
 
   // ── Evaluate on test set ──────────────────────────────────────────────────
-  double sum_rel_l2 = 0.0;
-  double sum_mse    = 0.0;
+  // Load u_grid_test for field-space comparison (tensors[6])
+  auto u_grid_all  = tensors[6].to(torch::kDouble);           // [500, 64, 64]
+  auto u_grid_test = u_grid_all.slice(0, N_train).contiguous();
+
+  // Precompute 64×64 parametric grid (same as generate_data)
+  constexpr int64_t Ngrid = 64;
+  auto xi_opts = torch::TensorOptions().dtype(torch::kDouble);
+  auto xi_1d   = torch::linspace(0.0, 1.0, Ngrid, xi_opts);
+  utils::TensorArray<2> xi_grid;
+  xi_grid[0] = xi_1d.repeat_interleave(Ngrid);
+  xi_grid[1] = xi_1d.repeat(Ngrid);
+
+  double sum_coeff_l2 = 0.0;   // Check 1a: coefficient-space (as before)
+  double sum_field_l2 = 0.0;   // Check 1b: field-space on 64×64 grid
+  double max_bc_viol  = 0.0;   // Check 2:  max boundary violation
 
   for (int64_t i = 0; i < N_test; ++i) {
     net.input<0>().from_tensor(G_test[i]);
     net.eval();
 
-    auto u_pred = net.output<0>().as_tensor();
-    auto u_true = u_test[i];
+    // ── Check 1a: coefficient-space L2 ──────────────────────────────────────
+    auto u_pred_coeff = net.output<0>().as_tensor();
+    auto u_true_coeff = u_test[i];
+    double ec  = (u_pred_coeff - u_true_coeff).norm().item<double>();
+    double rfc = u_true_coeff.norm().item<double>();
+    sum_coeff_l2 += (rfc > 0.0 ? ec / rfc : ec);
 
-    double err = (u_pred - u_true).norm().item<double>();
-    double ref = u_true.norm().item<double>();
-    sum_rel_l2 += (ref > 0.0 ? err / ref : err);
-    sum_mse    += torch::mse_loss(u_pred, u_true).item<double>();
+    // ── Check 1b: field-space L2 (evaluate predicted spline on 64×64) ───────
+    auto field_vals = net.output<0>().space<0>().eval(xi_grid);
+    auto u_pred_grid = field_vals[0]->reshape({Ngrid, Ngrid});  // [64, 64]
+    auto u_true_grid = u_grid_test[i];                          // [64, 64]
+    double ef  = (u_pred_grid - u_true_grid).norm().item<double>();
+    double rff = u_true_grid.norm().item<double>();
+    sum_field_l2 += (rff > 0.0 ? ef / rff : ef);
+
+    // ── Check 2: boundary violation ─────────────────────────────────────────
+    // Boundary of 64×64 grid = edges at xi=0,1 → rows/cols [0] and [63]
+    // For BCs u=0, predicted values at edges should be ≈ 0
+    auto grid = u_pred_grid;
+    double bc = std::max({
+        grid[0].abs().max().item<double>(),        // xi2 = 0  (row 0)
+        grid[Ngrid-1].abs().max().item<double>(),  // xi2 = 1  (row 63)
+        grid.select(0,0).abs().max().item<double>(),       // xi1 = 0  (col 0)
+        grid.select(0,Ngrid-1).abs().max().item<double>()  // xi1 = 1  (col 63)
+    });
+    max_bc_viol = std::max(max_bc_viol, bc);
   }
 
-  Log() << "[E1] Mean relative L2 error : " << sum_rel_l2 / N_test << "\n";
-  Log() << "[E1] Mean MSE               : " << sum_mse    / N_test << "\n";
+  Log() << "[E1] Mean coeff-space rel-L2 : " << sum_coeff_l2 / N_test << "\n";
+  Log() << "[E1] Mean field-space rel-L2 : " << sum_field_l2 / N_test << "\n";
+  Log() << "[E1] Max boundary violation  : " << max_bc_viol  << "\n";
 
   // ── Save ──────────────────────────────────────────────────────────────────
   net.save("e1_poissonnet.pt");
