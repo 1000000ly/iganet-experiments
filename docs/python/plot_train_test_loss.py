@@ -30,7 +30,8 @@ import numpy as np
 
 HERE         = os.path.dirname(os.path.abspath(__file__))
 DATASET_PATH = os.path.join(HERE, '../../build-tutorials/docs/dataset.pt')
-OUT_PNG      = os.path.join(HERE, 'train_test_loss.png')
+OUT_E1_PNG   = os.path.join(HERE, 'train_test_loss_E1.png')
+OUT_E2_PNG   = os.path.join(HERE, 'train_test_loss_E2.png')
 
 N_STEPS    = 30_000
 N_SEG      = 6
@@ -131,39 +132,45 @@ def train_and_record(G_tr, Y_tr, G_te, Y_te, label, device):
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
 
-def make_plot(results):
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-
+def make_single_plot(label, steps, train_n, test_n, out_path):
+    c   = COLORS[label]
     lr_boundaries = [N_STEPS * k // N_SEG for k in range(1, N_SEG)]
 
-    for col in lr_boundaries:
-        ax.axvline(col, color='gray', linewidth=0.6, linestyle=':', alpha=0.6)
+    fig, ax = plt.subplots(figsize=(7, 4.5))
 
-    for label, (steps, train_n, test_n) in results.items():
-        c = COLORS[label]
-        ax.semilogy(steps, train_n, '-',  color=c, linewidth=1.6,
-                    label=f'{label} train')
-        ax.semilogy(steps, test_n,  '--', color=c, linewidth=1.6,
-                    alpha=0.85, label=f'{label} test')
+    for x in lr_boundaries:
+        ax.axvline(x, color='gray', linewidth=0.6, linestyle=':', alpha=0.6)
+        ax.text(x + 150, ax.get_ylim()[1] if ax.get_ylim()[1] != 1.0 else 1.0,
+                'LR/2', fontsize=6.5, color='gray', rotation=90, va='top')
 
-    # Annotate LR decay points
-    for i, x in enumerate(lr_boundaries):
-        ax.text(x + 200, ax.get_ylim()[1] * 0.92,
-                f'LR/2', fontsize=6.5, color='gray',
+    ax.semilogy(steps, train_n, '-',  color=c, linewidth=1.8, label='Train')
+    ax.semilogy(steps, test_n,  '--', color=c, linewidth=1.8,
+                alpha=0.85, label='Test')
+
+    # Re-annotate after autoscale
+    ymax = ax.get_ylim()[1]
+    for x in lr_boundaries:
+        ax.text(x + 150, ymax * 0.85, 'LR/2', fontsize=6.5, color='gray',
                 rotation=90, va='top')
 
     ax.set_xlabel('Training step', fontsize=11)
     ax.set_ylabel('Normalised MSE loss  (loss / loss₀)', fontsize=11)
-    ax.set_title('E1 vs E2 — train & test loss curves\n'
+    ax.set_title(f'{label} — train & test loss\n'
                  f'(N_train={N_TR}, N_test={N_TE}, seed={SEED})', fontsize=10)
-    ax.legend(fontsize=9, ncol=2)
+    ax.legend(fontsize=10)
     ax.set_xlim(0, N_STEPS)
     ax.grid(True, which='both', alpha=0.25)
     fig.tight_layout()
-    fig.savefig(OUT_PNG, dpi=150, bbox_inches='tight')
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f'\nPlot saved: {OUT_PNG}')
-    assert os.path.exists(OUT_PNG)
+    print(f'Plot saved: {out_path}')
+    assert os.path.exists(out_path)
+
+
+def make_plots(results):
+    paths = {'E1': OUT_E1_PNG, 'E2': OUT_E2_PNG}
+    for label, (steps, train_n, test_n) in results.items():
+        make_single_plot(label, steps, train_n, test_n, paths[label])
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -184,7 +191,7 @@ def main():
     print('── E2 (label = Greville field values) ──')
     results['E2'] = train_and_record(G_tr, uv_tr, G_te, uv_te, 'E2', device)
 
-    make_plot(results)
+    make_plots(results)
 
     # Summary
     print('\nFinal normalised loss (lower = trained more):')
