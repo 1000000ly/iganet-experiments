@@ -14,6 +14,7 @@ IgANets framework. Four experiments are conducted:
 - **E2**: Greville field-value prediction baseline (3.19%)
 - **E3**: Loss function ablation (residual vs supervised)
 - **E4**: Comparison with Fourier Neural Operator
+- **E5**: Generalization study (σ_test × N_train grid)
 
 ## Reproducing experiments
 
@@ -37,6 +38,12 @@ cmake .. && make
 cd ../docs/python
 python e4_train.py
 python e4_eval.py
+
+# Run E5 (generalization study) — requires C++ build first
+cd build-tutorials && ./docs/e5_generate_testsets   # generates e5_test_s*.pt
+cd ../docs/python
+python e5_generalization.py   # → results.csv
+python e5_plot.py             # → e5_plot_A.pdf, e5_plot_B.pdf
 ```
 
 ## Key results
@@ -49,6 +56,7 @@ python e4_eval.py
 | E3 | Phase transition at α ≈ 1/κ(A) ≈ 0.001 | - |
 | E4 (FNO) | Field-space L2 | 2.26% |
 | E4 (FNO) | Inference time | 4.13ms (vs E1's 0.062ms) |
+| E5 | Generalization σ=0.10→0.25, N_train∈{50,100,200,400} | results.csv |
 
 See `report.pdf` for full analysis.
 
@@ -75,5 +83,8 @@ docs/
     e4_final.py              # E4: Combined train+eval
     verify_dataset.py        # Dataset integrity check
     e4_fno_ep1000.pt         # Trained FNO checkpoint (ep=1000)
+    e5_generalization.py     # E5: train E1/E2, sweep σ×N_train, save results.csv
+    e5_plot.py               # E5: Plot A (vs σ) and Plot B (vs N_train)
+  e5_generate_testsets.cxx   # E5: generate test sets at 4 σ values
 include/solver/ezsolver.hpp  # Modified: physical-domain Laplacian
 ```
