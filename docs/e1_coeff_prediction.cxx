@@ -135,14 +135,14 @@ int main() {
     sum_field_l2 += (rff > 0.0 ? ef / rff : ef);
 
     // ── Check 2: boundary violation ─────────────────────────────────────────
-    // Boundary of 64×64 grid = edges at xi=0,1 → rows/cols [0] and [63]
-    // For BCs u=0, predicted values at edges should be ≈ 0
+    // All 4 edges of 64×64 parametric grid: ξ₁∈{0,1} (rows) and ξ₂∈{0,1} (cols)
+    // BCs u=0 → predicted field at boundary should be ≈ 0
     auto grid = u_pred_grid;
     double bc = std::max({
-        grid[0].abs().max().item<double>(),        // xi2 = 0  (row 0)
-        grid[Ngrid-1].abs().max().item<double>(),  // xi2 = 1  (row 63)
-        grid.select(0,0).abs().max().item<double>(),       // xi1 = 0  (col 0)
-        grid.select(0,Ngrid-1).abs().max().item<double>()  // xi1 = 1  (col 63)
+        grid[0].abs().max().item<double>(),               // ξ₁=0  (row 0)
+        grid[Ngrid-1].abs().max().item<double>(),         // ξ₁=1  (row 63)
+        grid.select(1,0).abs().max().item<double>(),      // ξ₂=0  (col 0)
+        grid.select(1,Ngrid-1).abs().max().item<double>() // ξ₂=1  (col 63)
     });
     max_bc_viol = std::max(max_bc_viol, bc);
   }

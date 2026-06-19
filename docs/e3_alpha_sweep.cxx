@@ -153,10 +153,10 @@ int main() {
 
       // boundary violation (edges of 64×64 grid)
       double bc = std::max({
-          u_pgrid[0].abs().max().item<double>(),
-          u_pgrid[Ngrid-1].abs().max().item<double>(),
-          u_pgrid.select(0, 0).abs().max().item<double>(),
-          u_pgrid.select(0, Ngrid-1).abs().max().item<double>()
+          u_pgrid[0].abs().max().item<double>(),               // ξ₁=0
+          u_pgrid[Ngrid-1].abs().max().item<double>(),         // ξ₁=1
+          u_pgrid.select(1, 0).abs().max().item<double>(),     // ξ₂=0
+          u_pgrid.select(1, Ngrid-1).abs().max().item<double>() // ξ₂=1
       });
       max_bc = std::max(max_bc, bc);
     }

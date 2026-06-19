@@ -102,10 +102,10 @@ Metrics evaluate(E3Net& net,
     sr += (torch::mv(A_test[i], u_pred) - b_test[i]).norm().item<double>();
 
     double bc = std::max({
-        ug[0].abs().max().item<double>(),
-        ug[Ngrid-1].abs().max().item<double>(),
-        ug.select(0,0).abs().max().item<double>(),
-        ug.select(0,Ngrid-1).abs().max().item<double>()
+        ug[0].abs().max().item<double>(),               // ξ₁=0
+        ug[Ngrid-1].abs().max().item<double>(),         // ξ₁=1
+        ug.select(1,0).abs().max().item<double>(),      // ξ₂=0
+        ug.select(1,Ngrid-1).abs().max().item<double>() // ξ₂=1
     });
     mb = std::max(mb, bc);
   }
